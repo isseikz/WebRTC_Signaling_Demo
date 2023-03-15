@@ -30,7 +30,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun initServer() {
-        server = WebRtcServer(65432)
+        server = WebRtcServer()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {

@@ -6,14 +6,16 @@ import io.ktor.server.routing.*
 import io.ktor.server.websocket.*
 import io.ktor.websocket.*
 import kotlinx.coroutines.channels.ClosedReceiveChannelException
-import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.Json
-import kotlin.collections.HashMap
 
 class SignalingServer: Server {
     companion object {
         private const val TAG = "SignalingServer"
+        private val PROTOCOL_ERROR: (Throwable) -> CloseReason = {
+            CloseReason(CloseReason.Codes.PROTOCOL_ERROR, it.message ?: "")
+        }
     }
     private val waitingReceivers = HashMap<String, DefaultWebSocketServerSession>()
     private val waitingSenders = HashMap<String, DefaultWebSocketServerSession>()
@@ -45,10 +47,12 @@ class SignalingServer: Server {
                     }
                 } catch (e: ClosedReceiveChannelException) {
                     Log.e(TAG, "[$endpoint] closed", e)
-                    waitingReceivers.remove(token)
+                    closeSession(this, token)
                 } catch (e: Throwable) {
                     Log.e(TAG, "[$endpoint] exception thrown", e)
-                    waitingReceivers.remove(token)
+                    PROTOCOL_ERROR(e).also {
+                        closeSession(this, token, it)
+                    }
                 }
             }
             webSocket("/offer") {
@@ -58,9 +62,9 @@ class SignalingServer: Server {
                 try {
                     for (frame in incoming) {
                         val json = (frame as Frame.Text).readText()
-                        Json.decodeFromString<Offer>(json).let { offer ->
+                        Json.decodeFromString<SignalingInfo>(json).let { offer ->
                             token = offer.token
-                            waitingReceivers[token]?.let{ receiver ->
+                            waitingReceivers[token]?.let { receiver ->
                                 receiver.send(json)
                                 waitingSenders[token] = this
                             }
@@ -69,38 +73,68 @@ class SignalingServer: Server {
                     }
                 } catch (e: ClosedReceiveChannelException) {
                     Log.e(TAG, "$endpoint closed", e)
-                    waitingSenders.remove(token)
+                    closeSession(this, token)
                 } catch (e: Throwable) {
                     Log.e(TAG, "$endpoint exception thrown", e)
-                    waitingSenders.remove(token)
+                    PROTOCOL_ERROR(e).also {
+                        closeSession(this, token, it)
+                    }
                 }
             }
             webSocket("/answer") {
                 val endpoint = "/answer"
                 Log.d(TAG, endpoint)
+                var token = ""
                 try {
                     for (frame in incoming) {
                         val json = (frame as Frame.Text).readText()
-                        Json.decodeFromString<Answer>(json).let {
-                            waitingSenders[it.token]?.send(json)
-                            Log.d(TAG, "[$endpoint] sdp sent to ${it.token}")
+                        Json.decodeFromString<SignalingInfo>(json).let {
+                            token = it.token
+                            waitingSenders[token]?.send(json)
+                            Log.d(TAG, "[$endpoint] sdp sent to $token")
                         }
                     }
                 } catch (e: ClosedReceiveChannelException) {
                     Log.e(TAG, "$endpoint closed", e)
+                    closeSession(this, token)
                 } catch (e: Throwable) {
                     Log.e(TAG, "$endpoint exception thrown", e)
+                    PROTOCOL_ERROR(e).also {
+                        closeSession(this, token, it)
+                    }
                 }
             }
         }
     }
+
+    private suspend fun closeSession(
+        session: WebSocketSession,
+        token: String,
+        reason: CloseReason = CloseReason(CloseReason.Codes.NORMAL, "")
+    ) {
+        Log.d(TAG, "Closing session for token $token")
+        waitingReceivers.remove(token)
+        waitingSenders.remove(token)
+        try {
+            session.close(reason)
+        } catch (e: Throwable) {
+            Log.e(TAG, "Error occurred while closing session", e)
+        }
+    }
 }
 
+/**
+ * WaitOfferRequest class.
+ * @param token string representing token of the signaling session
+ */
 @Serializable
 data class WaitOfferRequest(val token: String)
 
+/**
+ * SignalingInfo class.
+ * @param token string representing token of the signaling session
+ * @param sdp string representing Session Description Protocol
+ * @param candidate string representing ICE Candidate used for establishing the P2P connection
+ */
 @Serializable
-data class Offer(val token: String, val sdp: String, val candidate: String)
-
-@Serializable
-data class Answer(val token: String, val sdp: String, val candidate: String)
+data class SignalingInfo(val token: String, val sdp: String, val candidate: String)
